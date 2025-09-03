@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import requests
+from bs4 import BeautifulSoup
+import json
+import datetime
+import time
+import os
+import random
+from typing import List, Dict, Any, Optional
+
+
+class PredictzScraper:
+    """
+    Predictz.com sitesinden futbol maç tahminleri verilerini çeken scraper.
+    """
+    
+    def __init__(self):
+        self.url = "https://www.predictz.com/predictions/tomorrow/"
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        self.output_folder = "data"
+        if not os.path.exists(self.output_folder):
+            os.makedirs(self.output_folder)
+    
+    def get_page_content(self) -> Optional[str]:
+        """
+        Web sayfasını indir ve HTML içeriğini döndür
+        """
+        try:
+            response = requests.get(self.url, headers=self.headers)
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as e:
+            print(f"Hata: Sayfa içeriği alınamadı - {e}")
+            return None
+    
+    def parse_page(self, html_content: str) -> List[Dict[str, Any]]:
+        """
+        HTML içeriğini ayrıştır ve maç tahminlerini çıkar
+        """
+        soup = BeautifulSoup(html_content, "html5lib")
+        leagues_data = []
+        
+        # Ana tabloyu bul
+        table_div = soup.select_one("div.pttable")
+        if not table_div:
+            print("Maç tablosu bulunamadı!")
+            return []
+        
+        # Lig başlıkları ve maç satırlarını bul
+        rows = table_div.find_all(class_=["pttrnh ptttl", "pttr ptcnt"])
+        
+        current_league = None
+        current_league_data = None
+        
+        for row in rows:
+            # Lig başlığı satırı
+            if "pttrnh" in row.get("class", []) and "ptttl" in row.get("class", []):
+                league_header = row.select_one("h2")
+                if league_header:
+                    current_league = league_header.text.strip()
+                    current_league_data = {
+                        "league_name": current_league,
+                        "matches": []
+                    }
+                    leagues_data.append(current_league_data)
+            
+            # Maç satırı
+            elif "pttr" in row.get("class", []) and "ptcnt" in row.get("class", []) and current_league_data:
+                # Takımları içeren hücreyi bul
+                game_cell = row.select_one("div.pttd.ptgame")
+                if not game_cell or " v " not in game_cell.text:
+                    continue
+                
+                # Takımları ayır
+                teams_text = game_cell.text.strip()
+                home_team, away_team = teams_text.split(" v ")
+                
+                # Tahmin kutusunu bul
+                prediction_cell = row.select_one("div.pttd.ptprd div")
+                score_prediction = prediction_cell.text.strip() if prediction_cell else None
+                
+                match_data = {
+                    "home_team": home_team.strip(),
+                    "away_team": away_team.strip(),
+                    "prediction": score_prediction
+                }
+                
+                current_league_data["matches"].append(match_data)
+        
+        return leagues_data
+    
+    def save_to_json(self, data: List[Dict[str, Any]]) -> str:
+        """
+        Veriyi JSON formatında kaydet
+        """
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        filename = f"{self.output_folder}/predictz_data_{today}.json"
+        
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        
+        return filename
+    
+    def run(self) -> None:
+        """
+        Scraper'ı çalıştır
+        """
+        print("Predictz.com verilerini çekme işlemi başlatılıyor...")
+        html_content = self.get_page_content()
+        
+        if not html_content:
+            print("Veri çekilemedi, işlem iptal edildi.")
+            return
+        
+        parsed_data = self.parse_page(html_content)
+        
+        if not parsed_data:
+            print("Ayrıştırılabilir veri bulunamadı.")
+            return
+        
+        saved_file = self.save_to_json(parsed_data)
+        print(f"Veri başarıyla kaydedildi: {saved_file}")
+        print(f"Toplam {sum(len(league['matches']) for league in parsed_data)} maç verisi, {len(parsed_data)} ligden çekildi.")
+
+
+if __name__ == "__main__":
+    scraper = PredictzScraper()
+    scraper.run() 

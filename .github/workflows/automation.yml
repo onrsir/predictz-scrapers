@@ -1,0 +1,66 @@
+name: İddia Meselesi Automation
+
+on:
+  schedule:
+    # Her gün saat 05:00 UTC (08:00 Türkiye saati)
+    - cron: '0 5 * * *'
+    # Her gün saat 17:00 UTC (20:00 Türkiye saati)  
+    - cron: '0 17 * * *'
+  workflow_dispatch: # Manuel çalıştırma için
+
+jobs:
+  scrape-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install Python dependencies
+      run: |
+        pip install requests beautifulsoup4 lxml html5lib
+        
+    - name: Install Node.js dependencies
+      working-directory: ./Predictor
+      run: |
+        npm install
+        
+    - name: Run automation
+      working-directory: ./automation
+      env:
+        # GitHub Secrets'tan Firebase config'i al
+        FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+        FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+        FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+      run: |
+        python automation_manager.py predictz
+        
+    - name: Upload logs as artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: automation-logs-${{ github.run_number }}
+        path: |
+          automation/logs/
+          automation/results/
+        retention-days: 30
+        
+    - name: Notify on failure
+      if: failure()
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#automation'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

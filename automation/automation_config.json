@@ -1,0 +1,31 @@
+{
+    "scrapers": {
+        "predictz": {
+            "enabled": true,
+            "class_name": "PredictzScraper",
+            "schedule": [
+                "08:00",
+                "20:00"
+            ]
+        }
+    },
+    "firebase": {
+        "auto_upload": true,
+        "delete_after_upload": false
+    },
+    "logging": {
+        "level": "INFO",
+        "max_file_size": "10MB",
+        "backup_count": 5
+    },
+    "notifications": {
+        "enabled": false,
+        "email": {
+            "smtp_server": "",
+            "port": 587,
+            "username": "",
+            "password": "",
+            "to_addresses": []
+        }
+    }
+}
