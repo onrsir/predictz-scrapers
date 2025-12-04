@@ -156,19 +156,16 @@ class AutomationManager:
                         error_message="Hiçbir predictz data dosyası bulunamadı"
                     )
                 
-                # En yeni dosyayı al (tarihe göre)
-                def extract_date_from_filename(file_path):
-                    """Dosya adından tarih çıkar (YYYY-MM-DD formatında)"""
-                    import re
-                    # predictz_combined_2025-09-05.json -> 2025-09-05
-                    # predictz_data_2025-09-05.json -> 2025-09-05
-                    match = re.search(r'(\d{4}-\d{2}-\d{2})', file_path.name)
-                    return match.group(1) if match else "1900-01-01"
-                
-                # En yeni tarihli dosyayı bul
-                latest_file = max(all_files, key=extract_date_from_filename)
-                latest_date = extract_date_from_filename(latest_file)
-                self.logger.info(f"En yeni dosya bulundu: {latest_file.name} (tarih: {latest_date}, değişiklik zamanı: {datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)})")
+                # En yeni dosyayı al (modification time'a göre)
+                # Combined dosyaları tek dosyalardan daha öncelikli tut
+                if combined_files:
+                    # Combined dosyalar arasında en yeni modification time'a sahip olanı seç
+                    latest_file = max(combined_files, key=lambda f: f.stat().st_mtime)
+                    self.logger.info(f"En yeni combined dosya bulundu: {latest_file.name} (değişiklik zamanı: {datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)})")
+                else:
+                    # Eğer combined dosya yoksa, tek dosyalar arasında en yeni modification time'a sahip olanı seç
+                    latest_file = max(single_files, key=lambda f: f.stat().st_mtime)
+                    self.logger.info(f"En yeni tek dosya bulundu: {latest_file.name} (değişiklik zamanı: {datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)})")
                 
                 # Eğer tek dosya ise, onu combined formatına dönüştür
                 if latest_file.name.startswith("predictz_data_"):
