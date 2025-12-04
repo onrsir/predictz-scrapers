@@ -1,0 +1,107 @@
+name: Predictz Burst Automation
+
+on:
+  schedule:
+    # Her 5 günde bir, Türkiye saatiyle 21:00'de (UTC 18:00)
+    - cron: '0 18 */5 * *'
+  workflow_dispatch: # Manuel tetikleme
+
+jobs:
+  burst-scrape-and-upload:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        
+    - name: Create Firebase credentials file
+      env:
+        FIREBASE_SERVICE_ACCOUNT_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+      run: |
+        if [ -n "$FIREBASE_SERVICE_ACCOUNT_JSON" ]; then
+          echo "$FIREBASE_SERVICE_ACCOUNT_JSON" > service-account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service-account.json" >> $GITHUB_ENV
+        fi
+        
+    - name: Run burst automation (10 attempts with 3-minute intervals)
+      working-directory: ./automation
+      env:
+        FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+        FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+        FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+        FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
+      run: |
+        #!/bin/bash
+        set +e  # Hataları görmek için devam et, ama exit code'u kontrol et
+        
+        TOTAL_ATTEMPTS=10
+        SLEEP_INTERVAL=180
+        FAILED_ATTEMPTS=0
+        SUCCESSFUL_ATTEMPTS=0
+        
+        for i in $(seq 1 $TOTAL_ATTEMPTS); do
+          echo "================================================"
+          echo "Deneme $i/$TOTAL_ATTEMPTS başlıyor..."
+          echo "Zaman: $(date)"
+          echo "================================================"
+          
+          python automation_manager.py
+          EXIT_CODE=$?
+          
+          if [ $EXIT_CODE -eq 0 ]; then
+            echo "✓ Deneme $i başarılı (exit code: $EXIT_CODE)"
+            ((SUCCESSFUL_ATTEMPTS++))
+          else
+            echo "✗ Deneme $i hata verdi (exit code: $EXIT_CODE) - Devam ediyorum..."
+            ((FAILED_ATTEMPTS++))
+          fi
+          
+          # Son deneme değilse, uyku
+          if [ $i -lt $TOTAL_ATTEMPTS ]; then
+            echo "Sonraki denemeye kadar $SLEEP_INTERVAL saniye bekleniyor..."
+            sleep $SLEEP_INTERVAL
+          fi
+        done
+        
+        echo "================================================"
+        echo "BURST OTOMASYON ÖZETİ"
+        echo "================================================"
+        echo "Toplam deneme: $TOTAL_ATTEMPTS"
+        echo "Başarılı: $SUCCESSFUL_ATTEMPTS"
+        echo "Başarısız: $FAILED_ATTEMPTS"
+        echo "Zaman: $(date)"
+        echo "================================================"
+        
+        # Eğer en az bir deneme başarılıysa, workflow başarılı say
+        if [ $SUCCESSFUL_ATTEMPTS -gt 0 ]; then
+          echo "En az bir deneme başarılı oldu. Workflow başarılı."
+          exit 0
+        else
+          echo "Tüm denemeler başarısız oldu. Workflow başarısız."
+          exit 1
+        fi
+        
+    - name: Upload logs and results as artifacts
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: burst-automation-logs-${{ github.run_number }}
+        path: |
+          automation/logs/
+          automation/results/
+        retention-days: 30
+        
+    - name: Clean up credentials file
+      if: always()
+      run: |
+        rm -f service-account.json
