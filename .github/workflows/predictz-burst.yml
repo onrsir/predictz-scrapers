@@ -45,7 +45,7 @@ jobs:
         set +e  # Hataları görmek için devam et, ama exit code'u kontrol et
         
         TOTAL_ATTEMPTS=10
-        SLEEP_INTERVAL=180
+        SLEEP_INTERVAL=10
         FAILED_ATTEMPTS=0
         SUCCESSFUL_ATTEMPTS=0
         
