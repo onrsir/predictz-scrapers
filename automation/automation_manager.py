@@ -38,6 +38,9 @@ class ScrapingResult:
     error_message: Optional[str] = None
     total_matches: int = 0
     leagues_count: int = 0
+    successful_dates: int = 0
+    partial: bool = False
+    required_dates: int = 0
 
 
 @dataclass
@@ -86,6 +89,11 @@ class AutomationManager:
                     "auto_upload": True,
                     "delete_after_upload": False
                 },
+                "scraping_rules": {
+                    "min_successful_dates": 2,
+                    "retry_delay_seconds": 1,
+                    "max_retries_if_needed": 0  # 0: sınırsız deneme
+                },
                 "logging": {
                     "level": "INFO",
                     "max_file_size": "10MB",
@@ -109,7 +117,19 @@ class AutomationManager:
             print(f"Default config oluşturuldu: {config_path}")
         
         with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+
+        # Eksik yeni ayarları varsayılanlarla tamamla
+        config.setdefault(
+            "scraping_rules",
+            {
+                "min_successful_dates": 2,
+                "retry_delay_seconds": 1,
+                "max_retries_if_needed": 0,
+            },
+        )
+
+        return config
     
     def setup_logging(self):
         """Logging sistemini kur"""
@@ -135,63 +155,106 @@ class AutomationManager:
         
         try:
             if scraper_name == "predictz":
-                scraper = PredictzScraper()
-                scraper.run()
-                
-                # En son oluşturulan veri dosyasını bul (combined veya tek dosya)
-                data_dir = self.scrapers_dir / "data"
-                
-                # Önce combined dosyaları ara
-                combined_files = list(data_dir.glob("predictz_combined_*.json"))
-                # Sonra tek dosyaları ara
-                single_files = list(data_dir.glob("predictz_data_*.json"))
-                
-                # Tüm dosyaları birleştir ve en yenisini bul
-                all_files = combined_files + single_files
-                
-                if not all_files:
+                rules = self.config.get("scraping_rules", {})
+                min_successful_dates = rules.get("min_successful_dates", 2)
+                retry_delay = rules.get("retry_delay_seconds", 1)
+                max_retries = rules.get("max_retries_if_needed", 0)  # 0: sınırsız
+                partial_ok_threshold = 1  # En az 1 gün varsa upload etmeyi dene
+
+                attempt = 0
+                scraper_run_info: Dict[str, Any] = {}
+                partial_success = False
+
+                while True:
+                    attempt += 1
+                    scraper = PredictzScraper()
+                    self.logger.info(f"{scraper_name} çalıştırma denemesi #{attempt}")
+
+                    try:
+                        scraper_run_info = scraper.run() or {}
+                    except Exception as exc:
+                        self.logger.error(f"{scraper_name} çalıştırma hatası: {exc}", exc_info=True)
+                        scraper_run_info = {}
+
+                    successful_dates = scraper_run_info.get("successful_dates", 0)
+                    total_matches = scraper_run_info.get("total_matches", 0)
+
+                    if successful_dates >= min_successful_dates and total_matches > 0:
+                        break
+
+                    # Kısmi başarı: en az 1 gün veri varsa upload et ama log'da eksik olduğunu belirt
+                    if successful_dates >= partial_ok_threshold and total_matches > 0:
+                        partial_success = True
+                        self.logger.info(
+                            f"{scraper_name}: {successful_dates}/{min_successful_dates} gün bulundu "
+                            f"(toplam maç: {total_matches}). Kısmi veri upload edilecek."
+                        )
+                        break
+
+                    if max_retries and attempt >= max_retries:
+                        self.logger.error(
+                            f"{scraper_name} yeterli gün sayısına ulaşamadı "
+                            f"({successful_dates}/{min_successful_dates}) ve maksimum deneme ({max_retries}) aşıldı."
+                        )
+                        break
+
+                    self.logger.warning(
+                        f"{scraper_name} yeterli gün çekemedi "
+                        f"({successful_dates}/{min_successful_dates}, toplam maç: {total_matches}). "
+                        f"{retry_delay} saniye sonra yeniden başlatılıyor..."
+                    )
+                    time.sleep(retry_delay)
+
+                if scraper_run_info.get("total_matches", 0) == 0:
                     return ScrapingResult(
                         scraper_name=scraper_name,
                         success=False,
-                        error_message="Hiçbir predictz data dosyası bulunamadı"
+                        error_message=(
+                            f"Yeni çalıştırmada veri yok "
+                            f"({scraper_run_info.get('successful_dates', 0)}/{min_successful_dates} gün). "
+                            "Önceki dosyalar yüklenmedi."
+                        ),
+                        successful_dates=scraper_run_info.get("successful_dates", 0),
+                        required_dates=min_successful_dates,
                     )
-                
-                # En yeni dosyayı al (modification time'a göre)
-                # Combined dosyaları tek dosyalardan daha öncelikli tut
-                if combined_files:
-                    # Combined dosyalar arasında en yeni modification time'a sahip olanı seç
-                    latest_file = max(combined_files, key=lambda f: f.stat().st_mtime)
-                    self.logger.info(f"En yeni combined dosya bulundu: {latest_file.name} (değişiklik zamanı: {datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)})")
-                else:
-                    # Eğer combined dosya yoksa, tek dosyalar arasında en yeni modification time'a sahip olanı seç
-                    latest_file = max(single_files, key=lambda f: f.stat().st_mtime)
-                    self.logger.info(f"En yeni tek dosya bulundu: {latest_file.name} (değişiklik zamanı: {datetime.datetime.fromtimestamp(latest_file.stat().st_mtime)})")
-                
-                # Eğer tek dosya ise, onu combined formatına dönüştür
-                if latest_file.name.startswith("predictz_data_"):
-                    self.logger.info(f"Tek dosya combined formatına dönüştürülüyor: {latest_file.name}")
-                    latest_file = self.convert_single_to_combined(latest_file)
-                else:
-                    self.logger.info(f"Combined dosya kullanılıyor: {latest_file.name}")
-                
-                # Dosyadan istatistikleri çıkar
-                with open(latest_file, "r", encoding="utf-8") as f:
+
+                combined_path_raw = scraper_run_info.get("combined_file")
+                combined_path = Path(combined_path_raw).resolve() if combined_path_raw else None
+                if not combined_path or not combined_path.exists():
+                    return ScrapingResult(
+                        scraper_name=scraper_name,
+                        success=False,
+                        error_message="Scraper çalıştı fakat yeni combined dosya bulunamadı; eski dosya kullanılmadı.",
+                        successful_dates=scraper_run_info.get("successful_dates", 0),
+                        required_dates=min_successful_dates,
+                    )
+
+                with open(combined_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                
-                total_matches = 0
-                leagues_count = 0
-                
-                for date_data in data.get("data_by_date", {}).values():
-                    leagues_count += len(date_data)
-                    for league in date_data:
-                        total_matches += len(league.get("matches", []))
-                
+
+                total_matches = scraper_run_info.get("total_matches", 0)
+                leagues_count = scraper_run_info.get("total_leagues", 0)
+
+                # Eğer kayıtlı lig sayısı yoksa dosyadan hesapla
+                if not leagues_count:
+                    leagues_count = sum(len(date_data) for date_data in data.get("data_by_date", {}).values())
+
+                if not total_matches:
+                    total_matches = sum(
+                        len(league.get("matches", []))
+                        for date_data in data.get("data_by_date", {}).values()
+                        for league in date_data
+                    )
+
                 return ScrapingResult(
                     scraper_name=scraper_name,
                     success=True,
-                    data_file=str(latest_file),
+                    data_file=str(combined_path),
                     total_matches=total_matches,
-                    leagues_count=leagues_count
+                    leagues_count=leagues_count,
+                    successful_dates=scraper_run_info.get("successful_dates", 0),
+                    partial=partial_success,
+                    required_dates=min_successful_dates,
                 )
             
             else:
@@ -252,7 +315,9 @@ class AutomationManager:
     
     def convert_combined_to_upload_format(self, combined_file: str) -> str:
         """Combined JSON formatını upload script'inin beklediği formata dönüştür"""
-        with open(combined_file, "r", encoding="utf-8") as f:
+        combined_path = Path(combined_file).resolve()
+
+        with open(combined_path, "r", encoding="utf-8") as f:
             combined_data = json.load(f)
         
         # Her tarih için ayrı dosya oluştur ve upload et
@@ -263,11 +328,11 @@ class AutomationManager:
             upload_data = leagues_data  # Bu zaten doğru format
             
             # Geçici upload dosyası oluştur
-            temp_file = Path(combined_file).parent / f"temp_upload_{date_str}.json"
+            temp_file = combined_path.parent / f"temp_upload_{date_str}.json"
             with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(upload_data, f, ensure_ascii=False, indent=2)
             
-            upload_results.append((str(temp_file), date_str))
+            upload_results.append((str(temp_file.resolve()), date_str))
         
         return upload_results
     
@@ -384,48 +449,112 @@ class AutomationManager:
         
         # Her scraper'ı çalıştır
         for scraper_name in scraper_names:
-            self.logger.info(f"=== {scraper_name.upper()} SCRAPER ===")
-            
-            # Scraping yap
-            scraping_result = self.run_scraper(scraper_name)
-            results["scrapers"][scraper_name] = scraping_result.__dict__
-            
-            if scraping_result.success:
-                results["summary"]["successful_scrapers"] += 1
-                results["summary"]["total_matches_scraped"] += scraping_result.total_matches
-                
-                self.logger.info(f"{scraper_name}: {scraping_result.total_matches} maç, {scraping_result.leagues_count} lig")
-                
-                # Firebase upload
-                if self.config["firebase"]["auto_upload"] and scraping_result.data_file:
-                    self.logger.info(f"=== {scraper_name.upper()} FIREBASE UPLOAD ===")
-                    
-                    upload_result = self.upload_to_firebase(scraping_result.data_file)
-                    results["uploads"][scraper_name] = upload_result.__dict__
-                    
-                    if upload_result.success:
-                        results["summary"]["total_matches_uploaded"] += upload_result.uploaded_matches
-                        results["summary"]["total_matches_skipped"] += upload_result.skipped_matches
-                        
-                        # Başarılı upload sonrası dosyayı sil (opsiyonel)
-                        if self.config["firebase"]["delete_after_upload"]:
-                            try:
-                                os.remove(scraping_result.data_file)
-                                self.logger.info(f"Upload sonrası dosya silindi: {scraping_result.data_file}")
-                            except Exception as e:
-                                self.logger.warning(f"Dosya silinemedi: {e}")
-                    else:
-                        self.send_notification(
-                            f"{scraper_name} Upload Hatası",
-                            f"Firebase upload başarısız: {upload_result.error_message}"
+            rules = self.config.get("scraping_rules", {})
+            min_successful_dates = rules.get("min_successful_dates", 2)
+            retry_delay = rules.get("retry_delay_seconds", 1)
+            max_retries = rules.get("max_retries_if_needed", 0)  # 0: sınırsız
+
+            attempt = 0
+            scraping_result: Optional[ScrapingResult] = None
+            last_upload_result: Optional[UploadResult] = None
+            total_uploaded_acc = 0
+            total_skipped_acc = 0
+
+            while True:
+                attempt += 1
+                self.logger.info(f"=== {scraper_name.upper()} SCRAPER (deneme {attempt}) ===")
+
+                # Scraping yap
+                scraping_result = self.run_scraper(scraper_name)
+
+                if scraping_result.success:
+                    if scraping_result.required_dates:
+                        self.logger.info(
+                            f"{scraper_name}: {scraping_result.successful_dates}/{scraping_result.required_dates} gün, "
+                            f"{scraping_result.total_matches} maç, {scraping_result.leagues_count} lig"
                         )
-                
-            else:
-                results["summary"]["failed_scrapers"] += 1
-                self.send_notification(
-                    f"{scraper_name} Scraper Hatası", 
-                    f"Scraping başarısız: {scraping_result.error_message}"
+                    else:
+                        self.logger.info(f"{scraper_name}: {scraping_result.total_matches} maç, {scraping_result.leagues_count} lig")
+
+                    # Firebase upload
+                    if self.config["firebase"]["auto_upload"] and scraping_result.data_file:
+                        self.logger.info(f"=== {scraper_name.upper()} FIREBASE UPLOAD ===")
+
+                        upload_result = self.upload_to_firebase(scraping_result.data_file)
+                        last_upload_result = upload_result
+
+                        if upload_result.success:
+                            total_uploaded_acc += upload_result.uploaded_matches
+                            total_skipped_acc += upload_result.skipped_matches
+
+                            # Başarılı upload sonrası dosyayı sil (opsiyonel)
+                            if self.config["firebase"]["delete_after_upload"]:
+                                try:
+                                    os.remove(scraping_result.data_file)
+                                    self.logger.info(f"Upload sonrası dosya silindi: {scraping_result.data_file}")
+                                except Exception as e:
+                                    self.logger.warning(f"Dosya silinemedi: {e}")
+                        else:
+                            self.send_notification(
+                                f"{scraper_name} Upload Hatası",
+                                f"Firebase upload başarısız: {upload_result.error_message}"
+                            )
+
+                else:
+                    self.logger.warning(
+                        f"{scraper_name} denemesi başarısız: {scraping_result.error_message}"
+                    )
+
+                # Döngüden çıkma koşulları
+                if scraping_result.success and scraping_result.successful_dates >= min_successful_dates:
+                    break
+                if max_retries and attempt >= max_retries:
+                    self.logger.warning(
+                        f"{scraper_name} maksimum deneme sayısına ulaştı ({max_retries}), döngü sonlandırılıyor."
+                    )
+                    break
+
+                self.logger.info(
+                    f"{scraper_name} yeterli gün değil ({scraping_result.successful_dates}/{min_successful_dates}). "
+                    f"{retry_delay} saniye sonra yeniden denenecek..."
                 )
+                time.sleep(retry_delay)
+
+            # Döngü sonrası sonuçları kaydet
+            if scraping_result:
+                results["scrapers"][scraper_name] = {**scraping_result.__dict__, "attempts": attempt}
+
+                if scraping_result.success:
+                    results["summary"]["successful_scrapers"] += 1
+                    results["summary"]["total_matches_scraped"] += scraping_result.total_matches
+                else:
+                    results["summary"]["failed_scrapers"] += 1
+                    self.send_notification(
+                        f"{scraper_name} Scraper Hatası", 
+                        f"Scraping başarısız: {scraping_result.error_message}"
+                    )
+
+            # Upload özetini kaydet
+            if last_upload_result:
+                results["uploads"][scraper_name] = {
+                    **last_upload_result.__dict__,
+                    "total_uploaded_matches": total_uploaded_acc,
+                    "total_skipped_matches": total_skipped_acc,
+                    "attempts": attempt,
+                }
+                if last_upload_result.success:
+                    results["summary"]["total_matches_uploaded"] += total_uploaded_acc
+                    results["summary"]["total_matches_skipped"] += total_skipped_acc
+            else:
+                results["uploads"][scraper_name] = {
+                    "success": False,
+                    "uploaded_matches": 0,
+                    "skipped_matches": 0,
+                    "error_message": "Upload çalıştırılmadı veya başarısız oldu",
+                    "attempts": attempt,
+                    "total_uploaded_matches": total_uploaded_acc,
+                    "total_skipped_matches": total_skipped_acc,
+                }
         
         # Sonuçları kaydet
         end_time = datetime.datetime.now()

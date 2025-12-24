@@ -177,9 +177,9 @@ class PredictzScraper:
         
         return filename
     
-    def run(self) -> None:
+    def run(self) -> Dict[str, Any]:
         """
-        Scraper'ı çalıştır - 4 günlük veri çeker
+        Scraper'ı çalıştır - 4 günlük veri çeker ve çalışma özetini döndürür
         """
         print("Predictz.com yarından başlayarak 4 günlük verilerini çekme işlemi başlatılıyor...")
         
@@ -191,6 +191,8 @@ class PredictzScraper:
         
         total_matches = 0
         successful_dates = 0
+        total_leagues = 0
+        combined_file = None
         
         for date_str in self.dates_to_scrape:
             print(f"\n{'='*50}")
@@ -219,6 +221,7 @@ class PredictzScraper:
             date_matches = sum(len(league['matches']) for league in parsed_data)
             total_matches += date_matches
             successful_dates += 1
+            total_leagues += len(parsed_data)
             
             print(f"✅ Tarih {date_str}: {date_matches} maç, {len(parsed_data)} lig")
             print(f"📁 Kaydedildi: {saved_file}")
@@ -244,6 +247,14 @@ class PredictzScraper:
             print(f"   • Birleştirilmiş dosya: {combined_file}")
         else:
             print("❌ Hiçbir tarih için veri çekilemedi.")
+
+        return {
+            "combined_file": combined_file,
+            "total_matches": total_matches,
+            "successful_dates": successful_dates,
+            "total_leagues": total_leagues,
+            "dates_with_data": list(all_data["data_by_date"].keys()),
+        }
 
 
 if __name__ == "__main__":

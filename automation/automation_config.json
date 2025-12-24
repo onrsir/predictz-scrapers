@@ -13,6 +13,11 @@
         "auto_upload": true,
         "delete_after_upload": false
     },
+    "scraping_rules": {
+        "min_successful_dates": 2,
+        "retry_delay_seconds": 1,
+        "max_retries_if_needed": 0
+    },
     "logging": {
         "level": "INFO",
         "max_file_size": "10MB",
